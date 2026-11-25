@@ -53,7 +53,7 @@ Log: `~/Library/Logs/claude-account-sync.log`. `./claude-account-sync uninstall`
 - The app may only read `scheduled-tasks.json` at startup, so a task made on one account can show up on the other after an app restart.
 - A scheduled task created on both accounts at the same moment loses one of them (newest file wins).
 - Deleting your last scheduled task does not propagate, because an empty list never overwrites a populated one.
-- The launch agent runs the Python that you used for `install`.
+- The launch agent starts the script through its `env python3` shebang with `PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`, so any Python 3.8+ on those paths works (Homebrew first, then the system one).
 
 ## Tests
 

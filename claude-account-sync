@@ -26,6 +26,7 @@ LABEL = "io.github.claude-account-sync"
 INSTALLED_BIN = Path.home() / ".local/bin/claude-account-sync"
 AGENT_PLIST = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
 LOG_FILE = Path.home() / "Library/Logs/claude-account-sync.log"
+AGENT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 SCHEDULES = "scheduled-tasks.json"
 RECENT_SECONDS = 2
 TRASH_DAYS = 30
@@ -195,10 +196,11 @@ def launchctl(*args):
 
 
 def install(root, schedules, dry_run):
-    args = [sys.executable, str(INSTALLED_BIN), "--root", str(root)] + (["--schedules"] if schedules else [])
+    args = [str(INSTALLED_BIN), "--root", str(root)] + (["--schedules"] if schedules else [])
     plist = {
         "Label": LABEL,
         "ProgramArguments": args,
+        "EnvironmentVariables": {"PATH": AGENT_PATH},
         "StartInterval": 60,
         "RunAtLoad": True,
         "StandardOutPath": str(LOG_FILE),

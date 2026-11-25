@@ -154,7 +154,7 @@ class InstallTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             mod.install(Path("/x"), schedules=True, dry_run=False)
         plist = plistlib.loads(mod.AGENT_PLIST.read_bytes())
-        self.assertEqual(plist["ProgramArguments"][1:], [str(mod.INSTALLED_BIN), "--root", "/x", "--schedules"])
+        self.assertEqual(plist["ProgramArguments"], [str(mod.INSTALLED_BIN), "--root", "/x", "--schedules"])
         self.assertIn("--schedules", plist["ProgramArguments"])
         self.assertTrue(mod.INSTALLED_BIN.exists())
 
