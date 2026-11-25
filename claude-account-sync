@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 DEFAULT_ROOT = Path.home() / "Library/Application Support/Claude/claude-code-sessions"
@@ -53,14 +54,31 @@ def org_dirs(root):
 
 def read_json(path):
     try:
-        return json.loads(path.read_text())
+        doc = json.loads(path.read_text())
     except (OSError, ValueError) as error:
         warn(f"skipping {path}: {error}")
         return None
+    if not isinstance(doc, dict):
+        warn(f"skipping {path}: not a JSON object")
+        return None
+    return doc
 
 
 def tasks_of(doc):
-    return [t for t in doc.get("scheduledTasks", []) if isinstance(t, dict) and "id" in t]
+    tasks = doc.get("scheduledTasks")
+    return [t for t in tasks if isinstance(t, dict) and "id" in t] if isinstance(tasks, list) else []
+
+
+def last_run(task):
+    value = task.get("lastRunAt")
+    if isinstance(value, (int, float)):
+        return value / 1000 if value > 1e11 else value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+    return 0
 
 
 class Syncer:
@@ -79,31 +97,41 @@ class Syncer:
         return time.time() - path.stat().st_mtime < RECENT_SECONDS
 
     def put(self, dst, data, mtime):
+        if self.dry_run:
+            return
         tmp = dst.with_name(f".{dst.name}.{os.getpid()}.tmp")
-        tmp.write_bytes(data)
-        os.utime(tmp, (mtime, mtime))
-        os.replace(tmp, dst)
+        try:
+            tmp.write_bytes(data)
+            os.utime(tmp, (mtime, mtime))
+            os.replace(tmp, dst)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def backup(self, path):
+        if self.dry_run:
+            return
         self.trash.mkdir(exist_ok=True)
-        shutil.copy2(path, self.trash / f"{time.time_ns()}_{path.parent.parent.name}_{path.name}")
+        shutil.copyfile(path, self.trash / f"{time.time_ns()}_{path.parent.parent.name}_{path.name}")
 
     def overwrite(self, dst, data, mtime, keep_old=False):
         self.act(f"write {dst.name} in {dst.parent.parent.name[:8]}")
-        if self.dry_run:
-            return
         if keep_old and dst.exists():
             self.backup(dst)
         self.put(dst, data, mtime)
 
+    def trash_file(self, path):
+        self.act(f"trash {path.name} in {path.parent.parent.name[:8]}")
+        self.backup(path)
+        if not self.dry_run:
+            path.unlink()
+
     def prune_trash(self):
         if self.dry_run or not self.trash.is_dir():
             return
-        cutoff = time.time_ns() - TRASH_DAYS * 86400 * 10**9
+        cutoff = time.time() - TRASH_DAYS * 86400
         for entry in self.trash.iterdir():
-            stamp = entry.name.split("_", 1)[0]
-            if stamp.isdigit() and int(stamp) < cutoff:
-                entry.unlink()
+            if entry.is_file() and entry.stat().st_mtime < cutoff:
+                entry.unlink(missing_ok=True)
 
     def sync_sessions(self, dirs):
         markers = {p.name[len("deleted_"):]: p for d in dirs for p in d.glob("deleted_*")}
@@ -112,50 +140,41 @@ class Syncer:
                 marker = d / f"deleted_{sid}"
                 if not marker.exists():
                     self.overwrite(marker, source.read_bytes(), source.stat().st_mtime)
-                meta = d / f"local_{sid}.json"
-                if meta.exists():
-                    self.act(f"trash {meta.name} in {d.parent.name[:8]}")
-                    if not self.dry_run:
-                        self.backup(meta)
-                        meta.unlink()
+                if (d / f"local_{sid}.json").exists():
+                    self.trash_file(d / f"local_{sid}.json")
 
         deleted_names = {f"local_{sid}.json" for sid in markers}
         for name in {p.name for d in dirs for p in d.glob("local_*.json")} - deleted_names:
-            present = [d / name for d in dirs if (d / name).exists()]
-            newest = max(present, key=lambda p: p.stat().st_mtime)
-            if self.is_recent(newest):
+            newest = max((d / name for d in dirs if (d / name).exists()), key=lambda p: p.stat().st_mtime)
+            if self.is_recent(newest) or read_json(newest) is None:
                 continue
+            data, mtime = newest.read_bytes(), newest.stat().st_mtime
             for d in dirs:
-                target = d / name
-                if not target.exists() or target.stat().st_mtime < newest.stat().st_mtime - 1:
-                    self.overwrite(target, newest.read_bytes(), newest.stat().st_mtime)
+                if not (d / name).exists() or (d / name).read_bytes() != data:
+                    self.overwrite(d / name, data, mtime)
 
-    def merged_tasks(self, docs):
+    def merged_tasks(self, docs_newest_first):
         merged = {}
-        for doc in docs:
+        for doc in docs_newest_first:
             for task in tasks_of(doc):
                 current = merged.get(task["id"])
-                if current is None or str(task.get("lastRunAt") or "") > str(current.get("lastRunAt") or ""):
+                if current is None or last_run(task) > last_run(current):
                     merged[task["id"]] = task
         return sorted(merged.values(), key=lambda t: t["createdAt"] if isinstance(t.get("createdAt"), (int, float)) else 0)
 
     def sync_schedules(self, dirs):
-        docs = {}
-        for d in dirs:
-            path = d / SCHEDULES
-            if path.exists() and (doc := read_json(path)) is not None:
-                docs[path] = doc
+        existing = [d / SCHEDULES for d in dirs if (d / SCHEDULES).exists()]
+        if not existing or any(self.is_recent(p) for p in existing):
+            return
+        docs = {p: doc for p in existing if (doc := read_json(p)) is not None}
         if not docs:
             return
         by_age = sorted(docs, key=lambda p: p.stat().st_mtime, reverse=True)
-        if self.is_recent(by_age[0]):
-            return
 
         if self.union:
             base = dict(docs[by_age[0]])
-            base["scheduledTasks"] = self.merged_tasks(docs.values())
-            data = (json.dumps(base, indent=2) + "\n").encode()
-            mtime = by_age[0].stat().st_mtime
+            base["scheduledTasks"] = self.merged_tasks([docs[p] for p in by_age])
+            data, mtime = (json.dumps(base, indent=2) + "\n").encode(), by_age[0].stat().st_mtime
         else:
             source = by_age[0]
             if not tasks_of(docs[source]):
@@ -173,11 +192,12 @@ class Syncer:
     def run(self):
         if not self.root.is_dir():
             sys.exit(f"{self.root} not found. Is the Claude desktop app installed?")
-        lock = open(self.root.parent / ".claude-account-sync.lock", "w")
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return
+        if not self.dry_run:
+            lock = open(self.root.parent / ".claude-account-sync.lock", "w")
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                sys.exit("Another sync is already running.")
         groups = org_dirs(self.root)
         if not groups and (self.verbose or self.dry_run):
             say("No organisation is shared by two accounts; nothing to sync.")
@@ -186,8 +206,8 @@ class Syncer:
                 self.sync_sessions(dirs)
                 if self.schedules:
                     self.sync_schedules(dirs)
-            except FileNotFoundError as error:
-                warn(f"skipping a round, a file disappeared: {error}")
+            except OSError as error:
+                warn(f"skipping a round: {error}")
         self.prune_trash()
 
 
@@ -218,12 +238,11 @@ def install(root, schedules, dry_run):
         plistlib.dump(plist, f)
     domain = f"gui/{os.getuid()}"
     launchctl("bootout", f"{domain}/{LABEL}")
-    for attempt in range(2):
-        result = launchctl("bootstrap", domain, str(AGENT_PLIST))
-        if result.returncode == 0:
-            break
+    result = launchctl("bootstrap", domain, str(AGENT_PLIST))
+    if result.returncode != 0:
         time.sleep(1)
-    else:
+        result = launchctl("bootstrap", domain, str(AGENT_PLIST))
+    if result.returncode != 0:
         sys.exit(f"launchctl bootstrap failed: {result.stderr.strip()}")
     say(f"Installed {AGENT_PLIST}; it syncs every minute.")
 
