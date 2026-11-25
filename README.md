@@ -6,16 +6,18 @@ The desktop app stores the sidebar list per account, so a session started under 
 
 This script syncs the per-account metadata in the background. One Python file, no dependencies, macOS only.
 
-> **Unofficial.** It reads and writes the app's undocumented files and may break after an app update. Quit nothing, but keep a backup of `~/Library/Application Support/Claude/claude-code-sessions` before the first run.
+> **Unofficial.** It reads and writes the app's undocumented files and may break after an app update. You don't need to quit the app, but keep a copy of `~/Library/Application Support/Claude/claude-code-sessions` before the first run.
 
 ## How it works
 
-For every organisation that more than one account belongs to, the folders `claude-code-sessions/<account>/<org>/` are synced with each other:
+For every organisation that more than one account belongs to, the folders `claude-code-sessions/<account>/<org>/` are synced with each other. Accounts in different organisations are not synced, and with one account nothing happens.
 
 - Session metadata (`local_*.json`): the newest file wins, missing files are copied.
-- Deleted sessions (`deleted_*` markers) are propagated; the metadata they remove goes to `claude-code-sessions-sync-trash/`, not to the void.
-- With `--schedules`: `scheduled-tasks.json`, newest file wins. The file that gets overwritten is first copied to the trash folder.
-- With `--union`: scheduled tasks are merged by id instead (the one with the newest `lastRunAt` wins per task). Use it once to combine lists that have drifted apart. A task deleted on one side comes back, so do not leave it on.
+- Deleted sessions (`deleted_*` markers) are propagated; the metadata they remove goes to `claude-code-sessions-sync-trash/`.
+- With `--schedules`: `scheduled-tasks.json`, newest file wins. An empty or unreadable list never overwrites a populated one.
+- With `--union`: scheduled tasks are merged by id instead (newest `lastRunAt` wins per task). Use it once to combine lists that have drifted apart. A task deleted on one side comes back, so do not leave it on.
+- Every file that gets overwritten or removed is first copied to the trash folder, and kept for 30 days.
+- Files modified in the last 2 seconds are skipped until the next round, so a half-written file is not copied around.
 
 Symlinking the folders together does not work: the app fails with `ENOTDIR` and keeps sessions only in memory.
 
@@ -24,31 +26,34 @@ Symlinking the folders together does not work: the app fails with `ENOTDIR` and 
 ```bash
 git clone https://github.com/NiekNijland/claude-desktop-account-sync.git
 cd claude-desktop-account-sync
-./claude-account-sync --dry-run          # see what would change
+./claude-account-sync --dry-run --schedules    # see what would change
+./claude-account-sync --union                  # once, only if your scheduled tasks differ per account
 ./claude-account-sync install --schedules
 ```
 
-`install` copies the script to `~/.local/bin/claude-account-sync` and loads a launch agent that runs it every 2 minutes and when the session folders change. Drop `--schedules` to sync sessions only. After adding a new account, run `install` again so its folder is watched (the 2-minute interval picks it up anyway).
+`install` copies the script to `~/.local/bin/claude-account-sync` and loads a launch agent that runs it every minute. Drop `--schedules` to sync sessions only. New accounts are picked up automatically. After `git pull`, run `install` again to update the installed copy.
 
-Log: `~/Library/Logs/claude-account-sync.log`. Remove everything with `./claude-account-sync uninstall`.
+Log: `~/Library/Logs/claude-account-sync.log`. `./claude-account-sync uninstall` removes the agent and the installed script; the log and the trash folder stay.
 
-If your schedule lists already differ, run `./claude-account-sync --union` once before installing.
+## Usage
 
-## Options
+`claude-account-sync [sync|install|uninstall] [options]`; `sync` is the default.
 
 | Flag | Effect |
 | --- | --- |
-| `-n`, `--dry-run` | Print what would change, change nothing |
-| `-v`, `--verbose` | Print every action |
+| `-n`, `--dry-run` | Print what would change, change nothing (also for `install` and `uninstall`) |
+| `-v`, `--verbose` | Also say when there is nothing to sync |
 | `--schedules` | Also sync `scheduled-tasks.json` |
-| `--union` | Merge scheduled tasks by id (implies `--schedules`) |
-| `--root PATH` | Session folder, or `CLAUDE_SESSIONS_ROOT` |
+| `--union` | One-off merge of scheduled tasks by id (implies `--schedules`, `sync` only) |
+| `--root PATH` | Session folder, or set `CLAUDE_SESSIONS_ROOT` |
 
 ## Caveats
 
-- Not tested while two accounts' apps run at the same time. Only one desktop app runs at a time, so this should not matter.
+- The agent and the running app can touch the same file. The 2-second rule and the trash folder limit the damage, but there is no real coordination.
 - The app may only read `scheduled-tasks.json` at startup, so a task made on one account can show up on the other after an app restart.
 - A scheduled task created on both accounts at the same moment loses one of them (newest file wins).
+- Deleting your last scheduled task does not propagate, because an empty list never overwrites a populated one.
+- The launch agent runs the Python that you used for `install`.
 
 ## Tests
 

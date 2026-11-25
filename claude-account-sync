@@ -11,12 +11,14 @@ that folder (~/.claude/projects) and are already shared.
 This uses an undocumented on-disk format and may break after an app update.
 """
 import argparse
+import fcntl
 import json
 import os
 import plistlib
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 DEFAULT_ROOT = Path.home() / "Library/Application Support/Claude/claude-code-sessions"
@@ -25,159 +27,213 @@ INSTALLED_BIN = Path.home() / ".local/bin/claude-account-sync"
 AGENT_PLIST = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
 LOG_FILE = Path.home() / "Library/Logs/claude-account-sync.log"
 SCHEDULES = "scheduled-tasks.json"
+RECENT_SECONDS = 2
+TRASH_DAYS = 30
+
+
+def say(msg):
+    print(msg, flush=True)
+
+
+def warn(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+def org_dirs(root):
+    groups = {}
+    for account in sorted(root.iterdir()):
+        if not account.is_dir() or account.is_symlink():
+            continue
+        for org in sorted(account.iterdir()):
+            if org.is_dir() and not org.is_symlink():
+                groups.setdefault(org.name, []).append(org)
+    return {name: dirs for name, dirs in groups.items() if len(dirs) > 1}
+
+
+def read_json(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError) as error:
+        warn(f"skipping {path}: {error}")
+        return None
+
+
+def tasks_of(doc):
+    return [t for t in doc.get("scheduledTasks", []) if isinstance(t, dict) and "id" in t]
 
 
 class Syncer:
-    def __init__(self, root, dry_run, verbose, schedules, union):
+    def __init__(self, root, dry_run=False, verbose=False, schedules=False, union=False):
         self.root = root
         self.trash = root.parent / "claude-code-sessions-sync-trash"
         self.dry_run = dry_run
-        self.verbose = verbose or dry_run
+        self.verbose = verbose
         self.schedules = schedules or union
         self.union = union
 
-    def log(self, msg):
-        if self.verbose:
-            print(("[dry-run] " if self.dry_run else "") + msg)
+    def act(self, msg):
+        say(("[dry-run] " if self.dry_run else "") + msg)
 
-    def org_dirs(self):
-        groups = {}
-        for account in sorted(self.root.iterdir()):
-            if not account.is_dir() or account.is_symlink():
-                continue
-            for org in sorted(account.iterdir()):
-                if org.is_dir() and not org.is_symlink():
-                    groups.setdefault(org.name, []).append(org)
-        return {name: dirs for name, dirs in groups.items() if len(dirs) > 1}
+    def is_recent(self, path):
+        return time.time() - path.stat().st_mtime < RECENT_SECONDS
 
-    def short(self, d):
-        return d.parent.name[:8]
-
-    def write_atomic(self, dst, data):
-        tmp = dst.with_name(f".{dst.name}.sync-tmp")
+    def put(self, dst, data, mtime):
+        tmp = dst.with_name(f".{dst.name}.{os.getpid()}.tmp")
         tmp.write_bytes(data)
+        os.utime(tmp, (mtime, mtime))
         os.replace(tmp, dst)
 
-    def copy_file(self, src, dst):
-        self.log(f"copy {src.name} -> {self.short(dst.parent)}")
-        if self.dry_run:
-            return
-        tmp = dst.with_name(f".{dst.name}.sync-tmp")
-        shutil.copy2(src, tmp)
-        os.replace(tmp, dst)
-
-    def to_trash(self, path, label):
-        self.log(f"trash {label}")
-        if self.dry_run:
-            return
+    def backup(self, path):
         self.trash.mkdir(exist_ok=True)
-        shutil.move(path, self.trash / label)
+        shutil.copy2(path, self.trash / f"{time.time_ns()}_{path.parent.parent.name}_{path.name}")
+
+    def overwrite(self, dst, data, mtime):
+        self.act(f"write {dst.name} in {dst.parent.parent.name[:8]}")
+        if self.dry_run:
+            return
+        if dst.exists():
+            self.backup(dst)
+        self.put(dst, data, mtime)
+
+    def prune_trash(self):
+        if self.dry_run or not self.trash.is_dir():
+            return
+        cutoff = time.time_ns() - TRASH_DAYS * 86400 * 10**9
+        for entry in self.trash.iterdir():
+            stamp = entry.name.split("_", 1)[0]
+            if stamp.isdigit() and int(stamp) < cutoff:
+                entry.unlink()
 
     def sync_sessions(self, dirs):
-        deleted = set()
+        markers = {p.name[len("deleted_"):]: p for d in dirs for p in d.glob("deleted_*")}
         for d in dirs:
-            deleted |= {p.name[len("deleted_"):] for p in d.glob("deleted_*")}
-
-        for d in dirs:
-            for sid in deleted:
+            for sid, source in markers.items():
                 marker = d / f"deleted_{sid}"
                 if not marker.exists():
-                    src = next(x / marker.name for x in dirs if (x / marker.name).exists())
-                    self.copy_file(src, marker)
+                    self.overwrite(marker, source.read_bytes(), source.stat().st_mtime)
                 meta = d / f"local_{sid}.json"
                 if meta.exists():
-                    self.to_trash(meta, f"{d.parent.name}_{meta.name}")
+                    self.act(f"trash {meta.name} in {d.parent.name[:8]}")
+                    if not self.dry_run:
+                        self.backup(meta)
+                        meta.unlink()
 
-        names = {p.name for d in dirs for p in d.glob("local_*.json") if p.name[len("local_"):-len(".json")] not in deleted}
-        for name in names:
+        deleted_names = {f"local_{sid}.json" for sid in markers}
+        for name in {p.name for d in dirs for p in d.glob("local_*.json")} - deleted_names:
             present = [d / name for d in dirs if (d / name).exists()]
             newest = max(present, key=lambda p: p.stat().st_mtime)
+            if self.is_recent(newest):
+                continue
             for d in dirs:
                 target = d / name
                 if not target.exists() or target.stat().st_mtime < newest.stat().st_mtime - 1:
-                    self.copy_file(newest, target)
+                    self.overwrite(target, newest.read_bytes(), newest.stat().st_mtime)
 
-    def union_schedules(self, files):
-        docs = [json.loads(f.read_text()) for f in files]
+    def merged_tasks(self, docs):
         merged = {}
         for doc in docs:
-            for task in doc.get("scheduledTasks", []):
+            for task in tasks_of(doc):
                 current = merged.get(task["id"])
-                if current is None or task.get("lastRunAt", "") > current.get("lastRunAt", ""):
+                if current is None or str(task.get("lastRunAt") or "") > str(current.get("lastRunAt") or ""):
                     merged[task["id"]] = task
-        base = dict(docs[0])
-        base["scheduledTasks"] = sorted(merged.values(), key=lambda t: t.get("createdAt", 0))
-        return (json.dumps(base, indent=2) + "\n").encode()
+        return sorted(merged.values(), key=lambda t: t["createdAt"] if isinstance(t.get("createdAt"), (int, float)) else 0)
 
     def sync_schedules(self, dirs):
-        files = [d / SCHEDULES for d in dirs if (d / SCHEDULES).exists()]
-        if not files:
+        docs = {}
+        for d in dirs:
+            path = d / SCHEDULES
+            if path.exists() and (doc := read_json(path)) is not None:
+                docs[path] = doc
+        if not docs:
             return
+        by_age = sorted(docs, key=lambda p: p.stat().st_mtime, reverse=True)
+        if self.is_recent(by_age[0]):
+            return
+
         if self.union:
-            data, label = self.union_schedules(files), "union"
+            base = dict(docs[by_age[0]])
+            base["scheduledTasks"] = self.merged_tasks(docs.values())
+            data = (json.dumps(base, indent=2) + "\n").encode()
+            mtime = by_age[0].stat().st_mtime
         else:
-            newest = max(files, key=lambda p: p.stat().st_mtime)
-            data, label = newest.read_bytes(), f"newest ({self.short(newest.parent)})"
+            source = by_age[0]
+            if not tasks_of(docs[source]):
+                populated = [p for p in by_age if tasks_of(docs[p])]
+                if populated:
+                    warn(f"{SCHEDULES} in {source.parent.parent.name[:8]} is empty; not letting it overwrite the others")
+                    source = populated[0]
+            data, mtime = source.read_bytes(), source.stat().st_mtime
+
         for d in dirs:
             target = d / SCHEDULES
-            if target.exists() and target.read_bytes() == data:
-                continue
-            self.log(f"schedules {label} -> {self.short(target.parent)}")
-            if self.dry_run:
-                continue
-            if target.exists():
-                self.trash.mkdir(exist_ok=True)
-                backup = f"{target.parent.parent.name}_{int(target.stat().st_mtime)}_{SCHEDULES}"
-                shutil.copy2(target, self.trash / backup)
-            self.write_atomic(target, data)
+            if not target.exists() or target.read_bytes() != data:
+                self.overwrite(target, data, mtime)
 
     def run(self):
         if not self.root.is_dir():
             sys.exit(f"{self.root} not found. Is the Claude desktop app installed?")
-        for dirs in self.org_dirs().values():
-            self.sync_sessions(dirs)
-            if self.schedules:
-                self.sync_schedules(dirs)
+        lock = open(self.root.parent / ".claude-account-sync.lock", "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        groups = org_dirs(self.root)
+        if not groups and (self.verbose or self.dry_run):
+            say("No organisation is shared by two accounts; nothing to sync.")
+        for dirs in groups.values():
+            try:
+                self.sync_sessions(dirs)
+                if self.schedules:
+                    self.sync_schedules(dirs)
+            except FileNotFoundError as error:
+                warn(f"skipping a round, a file disappeared: {error}")
+        self.prune_trash()
 
 
 def launchctl(*args):
     return subprocess.run(["launchctl", *args], capture_output=True, text=True)
 
 
-def install(root, schedules):
-    INSTALLED_BIN.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(Path(__file__).resolve(), INSTALLED_BIN)
-    INSTALLED_BIN.chmod(0o755)
-
-    watch = sorted(str(d) for dirs in Syncer(root, False, False, False, False).org_dirs().values() for d in dirs)
-    args = ["/usr/bin/python3", str(INSTALLED_BIN), "--root", str(root)]
-    if schedules:
-        args.append("--schedules")
+def install(root, schedules, dry_run):
+    args = [sys.executable, str(INSTALLED_BIN), "--root", str(root)] + (["--schedules"] if schedules else [])
     plist = {
         "Label": LABEL,
         "ProgramArguments": args,
-        "WatchPaths": watch,
-        "StartInterval": 120,
+        "StartInterval": 60,
         "RunAtLoad": True,
-        "ThrottleInterval": 10,
+        "StandardOutPath": str(LOG_FILE),
         "StandardErrorPath": str(LOG_FILE),
     }
+    if dry_run:
+        say(f"[dry-run] would install {INSTALLED_BIN} and {AGENT_PLIST}:\n{json.dumps(plist, indent=2)}")
+        return
+    INSTALLED_BIN.parent.mkdir(parents=True, exist_ok=True)
+    if Path(__file__).resolve() != INSTALLED_BIN.resolve():
+        shutil.copy2(Path(__file__).resolve(), INSTALLED_BIN)
+    INSTALLED_BIN.chmod(0o755)
     AGENT_PLIST.parent.mkdir(parents=True, exist_ok=True)
     with open(AGENT_PLIST, "wb") as f:
         plistlib.dump(plist, f)
     domain = f"gui/{os.getuid()}"
     launchctl("bootout", f"{domain}/{LABEL}")
-    result = launchctl("bootstrap", domain, str(AGENT_PLIST))
-    if result.returncode != 0:
+    for attempt in range(2):
+        result = launchctl("bootstrap", domain, str(AGENT_PLIST))
+        if result.returncode == 0:
+            break
+        time.sleep(1)
+    else:
         sys.exit(f"launchctl bootstrap failed: {result.stderr.strip()}")
-    print(f"Installed {AGENT_PLIST} watching {len(watch)} folders. Re-run install after adding an account.")
+    say(f"Installed {AGENT_PLIST}; it syncs every minute.")
 
 
-def uninstall():
+def uninstall(dry_run):
+    if dry_run:
+        say(f"[dry-run] would remove {AGENT_PLIST} and {INSTALLED_BIN}")
+        return
     launchctl("bootout", f"gui/{os.getuid()}/{LABEL}")
     AGENT_PLIST.unlink(missing_ok=True)
     INSTALLED_BIN.unlink(missing_ok=True)
-    print("Removed the launch agent and the installed script.")
+    say(f"Removed the launch agent and the installed script. The log ({LOG_FILE}) and the trash folder stay.")
 
 
 def main():
@@ -186,14 +242,16 @@ def main():
     parser.add_argument("-n", "--dry-run", action="store_true", help="only print what would change")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--schedules", action="store_true", help="also sync scheduled-tasks.json (newest file wins)")
-    parser.add_argument("--union", action="store_true", help="merge scheduled tasks by id instead; use once to combine diverged lists (implies --schedules)")
+    parser.add_argument("--union", action="store_true", help="merge scheduled tasks by id once; implies --schedules, not for install")
     parser.add_argument("--root", type=Path, default=Path(os.environ.get("CLAUDE_SESSIONS_ROOT", DEFAULT_ROOT)))
     args = parser.parse_args()
 
+    if args.command != "sync" and args.union:
+        parser.error("--union is a one-off merge; run it with 'sync', then install with --schedules")
     if args.command == "install":
-        install(args.root, args.schedules or args.union)
+        install(args.root, args.schedules, args.dry_run)
     elif args.command == "uninstall":
-        uninstall()
+        uninstall(args.dry_run)
     else:
         Syncer(args.root, args.dry_run, args.verbose, args.schedules, args.union).run()
 
