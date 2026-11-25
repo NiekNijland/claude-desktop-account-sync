@@ -11,7 +11,9 @@ that folder (~/.claude/projects) and are already shared.
 This uses an undocumented on-disk format and may break after an app update.
 """
 import argparse
+import contextlib
 import fcntl
+import io
 import json
 import os
 import plistlib
@@ -23,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 DEFAULT_ROOT = Path.home() / "Library/Application Support/Claude/claude-code-sessions"
+VERSION = "0.1.0"
 LABEL = "io.github.claude-account-sync"
 INSTALLED_BIN = Path.home() / ".local/bin/claude-account-sync"
 AGENT_PLIST = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
@@ -266,20 +269,82 @@ def uninstall(dry_run):
     say(f"Removed the launch agent and the installed script. The log ({LOG_FILE}) and the trash folder stay.")
 
 
+def ask(question, default=True, assume_yes=False):
+    if assume_yes:
+        return default
+    if not sys.stdin.isatty():
+        sys.exit("Not an interactive terminal; pass --yes to accept the defaults.")
+    answer = input(f"{question} [{'Y/n' if default else 'y/N'}] ").strip().lower()
+    return default if not answer else answer.startswith("y")
+
+
+def schedule_ids(dirs):
+    result = {}
+    for d in dirs:
+        doc = read_json(d / SCHEDULES) if (d / SCHEDULES).exists() else None
+        if doc is not None:
+            result[d.parent.name] = {t["id"] for t in tasks_of(doc)}
+    return result
+
+
+def check(root):
+    """Describe what a sync would do. Returns (groups, task lists differ?)."""
+    if not root.is_dir():
+        sys.exit(f"{root} not found. Is the Claude desktop app installed and signed in?")
+    groups = org_dirs(root)
+    if not groups:
+        sys.exit("No organisation is shared by two accounts yet. Sign in with both accounts in the "
+                 "Claude desktop app (and open the Code tab once each), then try again.")
+    differ = False
+    for org, dirs in groups.items():
+        say(f"Organisation {org[:8]}, {len(dirs)} accounts:")
+        for d in dirs:
+            say(f"  {d.parent.name[:8]}: {len(list(d.glob('local_*.json')))} sessions")
+        ids = schedule_ids(dirs)
+        if ids:
+            differ = differ or len({frozenset(v) for v in ids.values()}) > 1
+            for account, names in ids.items():
+                say(f"  {account[:8]}: {len(names)} scheduled tasks")
+    pending = io.StringIO()
+    with contextlib.redirect_stdout(pending):
+        Syncer(root, dry_run=True, schedules=True).run()
+    say(f"A sync would change {len(pending.getvalue().splitlines())} files right now.")
+    if differ:
+        say("The accounts have different scheduled tasks.")
+    return groups, differ
+
+
+def guided_install(root, schedules, assume_yes):
+    groups, differ = check(root)
+    has_schedules = any(schedule_ids(dirs) for dirs in groups.values())
+    schedules = schedules or (has_schedules and ask("Also keep scheduled tasks in sync?", assume_yes=assume_yes))
+    if schedules and differ and ask("Merge the task lists into one now? Nothing is lost; originals go to the trash folder.", assume_yes=assume_yes):
+        Syncer(root, union=True).run()
+    if not ask("Install the launch agent (syncs every minute)?", assume_yes=assume_yes):
+        return
+    install(root, schedules, dry_run=False)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("command", nargs="?", choices=["sync", "install", "uninstall"], default="sync")
+    parser.add_argument("command", nargs="?", choices=["sync", "check", "install", "uninstall"], default="sync")
     parser.add_argument("-n", "--dry-run", action="store_true", help="only print what would change")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--schedules", action="store_true", help="also sync scheduled-tasks.json (newest file wins)")
     parser.add_argument("--union", action="store_true", help="merge scheduled tasks by id once; implies --schedules, not for install")
+    parser.add_argument("--yes", action="store_true", help="install: accept the defaults without asking")
+    parser.add_argument("--version", action="version", version=VERSION)
     parser.add_argument("--root", type=Path, default=Path(os.environ.get("CLAUDE_SESSIONS_ROOT", DEFAULT_ROOT)))
     args = parser.parse_args()
 
     if args.command != "sync" and args.union:
         parser.error("--union is a one-off merge; run it with 'sync', then install with --schedules")
-    if args.command == "install":
-        install(args.root, args.schedules, args.dry_run)
+    if args.command == "check":
+        check(args.root)
+    elif args.command == "install" and args.dry_run:
+        install(args.root, args.schedules, dry_run=True)
+    elif args.command == "install":
+        guided_install(args.root, args.schedules, args.yes)
     elif args.command == "uninstall":
         uninstall(args.dry_run)
     else:

@@ -25,21 +25,33 @@ Symlinking the folders together does not work: the app fails with `ENOTDIR` and 
 
 ## Install
 
+**With Homebrew** (recommended):
+
+```bash
+brew install NiekNijland/tap/claude-account-sync
+claude-account-sync check            # shows your accounts and what would change
+brew services start claude-account-sync
+```
+
+`brew services` runs the sync every minute, including scheduled tasks. Update with `brew upgrade`, remove with `brew services stop claude-account-sync && brew uninstall claude-account-sync`.
+
+**Without Homebrew:**
+
 ```bash
 git clone https://github.com/NiekNijland/claude-desktop-account-sync.git
 cd claude-desktop-account-sync
-./claude-account-sync --dry-run --schedules    # see what would change
-./claude-account-sync --union                  # once, only if your scheduled tasks differ per account
-./claude-account-sync install --schedules
+./claude-account-sync install
 ```
 
-`install` copies the script to `~/.local/bin/claude-account-sync` and loads a launch agent that runs it every minute. Drop `--schedules` to sync sessions only. New accounts are picked up automatically. After `git pull`, run `install` again to update the installed copy.
+`install` is guided: it shows your accounts and what would change, offers to keep scheduled tasks in sync, offers to merge task lists that differ (nothing is lost), and asks before it installs the launch agent. `--yes` accepts all defaults. The agent runs every minute; new accounts are picked up automatically. After `git pull`, run `install` again to update the installed copy.
 
-Log: `~/Library/Logs/claude-account-sync.log` (emptied when it grows past 1 MB). `./claude-account-sync uninstall` removes the agent and the installed script; the log, the trash folder and the lock file (`claude-code-sessions` sibling `.claude-account-sync.lock`) stay.
+Sign in with both accounts in the Claude desktop app, and open the Code tab once with each, before you install.
+
+Log: `~/Library/Logs/claude-account-sync.log` (emptied when it grows past 1 MB). `./claude-account-sync uninstall` removes the agent and the installed script; the log, the trash folder and the lock file (`.claude-account-sync.lock`, next to the session folder) stay.
 
 ## Usage
 
-`claude-account-sync [sync|install|uninstall] [options]`; `sync` is the default.
+`claude-account-sync [sync|check|install|uninstall] [options]`; `sync` is the default. `check` only describes your accounts and what a sync would change.
 
 | Flag | Effect |
 | --- | --- |
@@ -47,6 +59,8 @@ Log: `~/Library/Logs/claude-account-sync.log` (emptied when it grows past 1 MB).
 | `-v`, `--verbose` | Also say when there is nothing to sync |
 | `--schedules` | Also sync `scheduled-tasks.json` |
 | `--union` | One-off merge of scheduled tasks by id (implies `--schedules`, `sync` only) |
+| `--yes` | `install`: accept the defaults without asking |
+| `--version` | Print the version |
 | `--root PATH` | Session folder, or set `CLAUDE_SESSIONS_ROOT` |
 
 ## Caveats

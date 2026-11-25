@@ -206,6 +206,49 @@ class SyncTest(unittest.TestCase):
                 self.sync()
 
 
+class GuidedInstallTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "claude-code-sessions"
+        self.a = self.root / "account-a" / ORG
+        self.b = self.root / "account-b" / ORG
+        self.a.mkdir(parents=True)
+        self.b.mkdir(parents=True)
+        for patch in (contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO())):
+            patch.__enter__()
+            self.addCleanup(patch.__exit__, None, None, None)
+        installer = mock.patch.object(mod, "install")
+        self.install = installer.start()
+        self.addCleanup(installer.stop)
+
+    def put(self, d, text, mtime=1000):
+        (d / mod.SCHEDULES).write_text(text)
+        os.utime(d / mod.SCHEDULES, (mtime, mtime))
+
+    def test_check_needs_two_accounts_in_one_organisation(self):
+        shutil.rmtree(self.b.parent)
+        with self.assertRaises(SystemExit):
+            mod.check(self.root)
+
+    def test_yes_merges_differing_task_lists_and_installs_with_schedules(self):
+        self.put(self.a, tasks("a"))
+        self.put(self.b, tasks("b"), 2000)
+        mod.guided_install(self.root, schedules=False, assume_yes=True)
+        for d in (self.a, self.b):
+            self.assertEqual({t["id"] for t in json.loads((d / mod.SCHEDULES).read_text())["scheduledTasks"]}, {"a", "b"})
+        self.install.assert_called_once_with(self.root, True, dry_run=False)
+
+    def test_declining_the_agent_installs_nothing(self):
+        with mock.patch.object(mod.sys.stdin, "isatty", return_value=True), mock.patch("builtins.input", return_value="n"):
+            mod.guided_install(self.root, schedules=False, assume_yes=False)
+        self.install.assert_not_called()
+
+    def test_not_interactive_without_yes_exits(self):
+        with mock.patch.object(mod.sys.stdin, "isatty", return_value=False), self.assertRaises(SystemExit):
+            mod.guided_install(self.root, schedules=False, assume_yes=False)
+
+
 class LogTest(unittest.TestCase):
     def test_log_is_truncated_when_too_big_and_left_alone_otherwise(self):
         with tempfile.TemporaryDirectory() as tmp:
