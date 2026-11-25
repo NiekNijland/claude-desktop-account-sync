@@ -16,7 +16,7 @@ For every organisation that more than one account belongs to, the folders `claud
 - Deleted sessions (`deleted_*` markers) are propagated; the metadata they remove goes to `claude-code-sessions-sync-trash/`.
 - With `--schedules`: `scheduled-tasks.json`, newest file wins. An empty or unreadable list never overwrites a populated one.
 - With `--union`: scheduled tasks are merged by id instead (newest `lastRunAt` wins per task). Use it once to combine lists that have drifted apart. A task deleted on one side comes back, so do not leave it on.
-- Every file that gets overwritten or removed is first copied to the trash folder, and kept for 30 days.
+- A deleted session and an overwritten `scheduled-tasks.json` are first copied to the trash folder, and kept for 30 days. Routine session updates are not backed up.
 - Files modified in the last 2 seconds are skipped until the next round, so a half-written file is not copied around.
 
 Symlinking the folders together does not work: the app fails with `ENOTDIR` and keeps sessions only in memory.

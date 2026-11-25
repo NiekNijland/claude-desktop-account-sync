@@ -56,13 +56,13 @@ class SyncTest(unittest.TestCase):
     def trashed(self):
         return list(self.trash.iterdir()) if self.trash.exists() else []
 
-    def test_newest_session_wins_and_overwritten_one_is_backed_up(self):
+    def test_newest_session_wins_without_filling_the_trash(self):
         self.write(self.a / "local_1.json", "old", 1000)
         self.write(self.b / "local_1.json", "new", 2000)
         self.sync()
         self.assertEqual((self.a / "local_1.json").read_text(), "new")
         self.assertEqual((self.a / "local_1.json").stat().st_mtime, 2000)
-        self.assertEqual(len(self.trashed()), 1)
+        self.assertEqual(self.trashed(), [])
 
     def test_missing_session_is_copied(self):
         self.write(self.a / "local_2.json", "x")

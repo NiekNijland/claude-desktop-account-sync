@@ -88,11 +88,11 @@ class Syncer:
         self.trash.mkdir(exist_ok=True)
         shutil.copy2(path, self.trash / f"{time.time_ns()}_{path.parent.parent.name}_{path.name}")
 
-    def overwrite(self, dst, data, mtime):
+    def overwrite(self, dst, data, mtime, keep_old=False):
         self.act(f"write {dst.name} in {dst.parent.parent.name[:8]}")
         if self.dry_run:
             return
-        if dst.exists():
+        if keep_old and dst.exists():
             self.backup(dst)
         self.put(dst, data, mtime)
 
@@ -168,7 +168,7 @@ class Syncer:
         for d in dirs:
             target = d / SCHEDULES
             if not target.exists() or target.read_bytes() != data:
-                self.overwrite(target, data, mtime)
+                self.overwrite(target, data, mtime, keep_old=True)
 
     def run(self):
         if not self.root.is_dir():
