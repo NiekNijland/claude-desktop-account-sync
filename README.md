@@ -1,5 +1,7 @@
 # claude-desktop-account-sync
 
+[![Tests](https://github.com/NiekNijland/claude-desktop-account-sync/actions/workflows/test.yml/badge.svg)](https://github.com/NiekNijland/claude-desktop-account-sync/actions/workflows/test.yml)
+
 Keep the Claude desktop app's **Code sessions** (and optionally **scheduled tasks**) in step between several accounts on one Mac.
 
 The desktop app stores the sidebar list per account, so a session started under account A is missing under account B, even though the transcripts in `~/.claude/projects` are shared. Scheduled tasks have the same problem: the task files are shared, but each account has its own list of schedules.
@@ -33,7 +35,7 @@ cd claude-desktop-account-sync
 
 `install` copies the script to `~/.local/bin/claude-account-sync` and loads a launch agent that runs it every minute. Drop `--schedules` to sync sessions only. New accounts are picked up automatically. After `git pull`, run `install` again to update the installed copy.
 
-Log: `~/Library/Logs/claude-account-sync.log`. `./claude-account-sync uninstall` removes the agent and the installed script; the log, the trash folder and the lock file (`claude-code-sessions` sibling `.claude-account-sync.lock`) stay.
+Log: `~/Library/Logs/claude-account-sync.log` (emptied when it grows past 1 MB). `./claude-account-sync uninstall` removes the agent and the installed script; the log, the trash folder and the lock file (`claude-code-sessions` sibling `.claude-account-sync.lock`) stay.
 
 ## Usage
 

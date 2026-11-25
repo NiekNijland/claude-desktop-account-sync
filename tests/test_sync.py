@@ -206,6 +206,20 @@ class SyncTest(unittest.TestCase):
                 self.sync()
 
 
+class LogTest(unittest.TestCase):
+    def test_log_is_truncated_when_too_big_and_left_alone_otherwise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "sync.log"
+            with mock.patch.object(mod, "LOG_FILE", log), mock.patch.object(mod, "MAX_LOG_BYTES", 10):
+                mod.rotate_log()
+                log.write_text("short")
+                mod.rotate_log()
+                self.assertEqual(log.read_text(), "short")
+                log.write_text("x" * 11)
+                mod.rotate_log()
+                self.assertEqual(log.read_text(), "")
+
+
 class InstallTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

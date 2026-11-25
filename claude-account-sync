@@ -31,6 +31,7 @@ AGENT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 SCHEDULES = "scheduled-tasks.json"
 RECENT_SECONDS = 2
 TRASH_DAYS = 30
+MAX_LOG_BYTES = 1_000_000
 
 
 def say(msg):
@@ -211,6 +212,14 @@ class Syncer:
         self.prune_trash()
 
 
+def rotate_log():
+    try:
+        if LOG_FILE.stat().st_size > MAX_LOG_BYTES:
+            LOG_FILE.write_text("")
+    except FileNotFoundError:
+        pass
+
+
 def launchctl(*args):
     return subprocess.run(["launchctl", *args], capture_output=True, text=True)
 
@@ -274,6 +283,8 @@ def main():
     elif args.command == "uninstall":
         uninstall(args.dry_run)
     else:
+        if not args.dry_run:
+            rotate_log()
         Syncer(args.root, args.dry_run, args.verbose, args.schedules, args.union).run()
 
 
