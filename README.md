@@ -56,7 +56,7 @@ Log: `~/Library/Logs/claude-account-sync.log` (emptied when it grows past 1 MB).
 - A scheduled task created on both accounts at the same moment loses one of them (newest file wins).
 - Deleting your last scheduled task on one account is undone by the next sync, because an empty list never overwrites a populated one.
 - A deleted session id stays deleted: if a session with that id turns up again, it is moved to the trash.
-- The launch agent starts the script through its `env python3` shebang with `PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`, so any Python 3.8+ on those paths works (Homebrew first, then the system one).
+- The launch agent starts the script through its `env python3` shebang with `PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`, so any Python 3.9+ on those paths works (Homebrew first, then the system one).
 
 ## Tests
 
